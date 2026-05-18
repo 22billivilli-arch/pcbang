@@ -294,17 +294,40 @@
 </div>
 
 <datalist id="customer-list">
-  <option value="성서이모"><option value="태경이모(칠곡이모)"><option value="성동제사장">
-  <option value="황정수(변사장펫)"><option value="진아이모"><option value="박사장(불독윤지인)">
-  <option value="김안규"><option value="귀화이모"><option value="은정이모">
-  <option value="흰머리이모"><option value="윤사장지인(설비)"><option value="디테일박스">
-  <option value="0202사장님"><option value="불독윤"><option value="가요방지인(경임언니)">
-  <option value="가요방사장(열매언니)"><option value="가요방지인(안나언니)"><option value="가요방지인(떡집사장)">
-  <option value="현풍이모"><option value="현풍이모 남자"><option value="변덕구">
-  <option value="조사장(돌사장지인)"><option value="돌사장"><option value="도사장(안경할배지인)">
-  <option value="종욱사장"><option value="제비박"><option value="김인석">
-  <option value="보도김"><option value="보도리"><option value="보도윤">
-  <option value="변사장"><option value="멋쟁이이모"><option value="안경할배(스님)"><option value="777이모">
+  <option value="0202사장님">
+  <option value="가요방사장(열매언니)">
+  <option value="가요방지인(경임언니)">
+  <option value="가요방지인(떡집사장)">
+  <option value="가요방지인(안나언니)">
+  <option value="귀화이모">
+  <option value="김안규">
+  <option value="디테일박스">
+  <option value="도사장(안경할배지인)">
+  <option value="돌사장">
+  <option value="멋쟁이이모">
+  <option value="박사장(불독윤지인)">
+  <option value="변덕구">
+  <option value="변사장">
+  <option value="보도김">
+  <option value="보도리">
+  <option value="보도윤">
+  <option value="불독윤">
+  <option value="성동제사장">
+  <option value="성서이모">
+  <option value="안경할배(스님)">
+  <option value="은정이모">
+  <option value="윤사장지인(설비)">
+  <option value="제비박">
+  <option value="조사장(돌사장지인)">
+  <option value="종욱사장">
+  <option value="진아이모">
+  <option value="태경이모(칠곡이모)">
+  <option value="현풍이모">
+  <option value="현풍이모 남자">
+  <option value="777이모">
+  <option value="황정수(변사장펫)">
+  <option value="흰머리이모">
+  <option value="김인석">
 </datalist>
 
 <!-- ══ 장부 탭 ══ -->
@@ -440,11 +463,16 @@ const db  = getFirestore(app);
 
 // ── 전역 상태 ──
 let data = [];
-let sortKey = 'date', sortDir = 'desc';
+let sortKey = 'name', sortDir = 'asc';
 
 // ── 유틸 ──
 function todayStr() { return new Date().toISOString().slice(0,10); }
-function fmt(n) { return '₩' + Math.abs(n).toLocaleString('ko-KR'); }
+function fmt(n) {
+  const v = Math.abs(n);
+  if (v === 0) return '0만원';
+  const man = v / 10000;
+  return (Number.isInteger(man) ? man : man.toFixed(1)) + '만원';
+}
 function fmtSigned(n) { return (n>=0?'+':'-') + fmt(n); }
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
@@ -484,6 +512,7 @@ window.setShortcut = function(type) {
 
 // ── Firebase 실시간 구독 ──
 const q = query(collection(db,'records'), orderBy('createdAt','desc'));
+let firstLoad = true;
 onSnapshot(q, (snap) => {
   data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   renderLedger();
@@ -492,6 +521,9 @@ onSnapshot(q, (snap) => {
   const badge = document.getElementById('conn-badge');
   badge.className = 'conn-badge online';
   badge.innerHTML = '<span class="conn-dot"></span> 실시간 연결';
+  // 첫 로드 이후 변경(새 내역 추가)될 때만 알림 체크
+  if (!firstLoad) checkAlerts(data);
+  firstLoad = false;
 }, (err) => {
   console.error(err);
   document.getElementById('loading-overlay').style.display = 'none';
@@ -592,7 +624,7 @@ function renderLedger() {
       <td><span class="badge-type ${r.type}">${ic?'충전':'환전'}</span></td>
       <td class="money charge">${ic?fmt(r.amount):'-'}</td>
       <td class="money exchange">${!ic?fmt(r.amount):'-'}</td>
-      <td class="money profit ${pc}">₩${(running>=0?'+':'')+running.toLocaleString('ko-KR')}</td>
+      <td class="money profit ${pc}">${(running>=0?'+':'-')}${fmt(running)}</td>
       <td><button class="del-btn" onclick="deleteRow('${r.id}')">✕</button></td>
     </tr>`;
   }).join('');
@@ -616,16 +648,18 @@ window.renderMgmt = function() {
   });
 
   let members=Object.values(map).map(m=>{
-    const profit=m.charge-m.exchange;
-    const taxi=profit>0?Math.round(profit*0.2):0;
-    const net=profit-taxi;
-    return{...m,profit,taxi,net};
+    // 잃은금액 = 환전 - 충전 (손님 입장에서 잃은 돈 → 우리 수익)
+    const lost = m.exchange - m.charge; // 양수 = 손님이 잃음, 음수 = 손님이 이김
+    const taxi = lost > 0 ? Math.round(lost * 0.2) : 0;
+    const net  = lost - taxi;
+    const rate = m.charge > 0 ? Math.round((m.exchange / m.charge) * 100) : 0;
+    return{...m, lost, taxi, net, rate};
   });
 
   if(search) members=members.filter(m=>m.name.toLowerCase().includes(search));
   members.sort((a,b)=>{
-    if(sortV==='profit-desc') return b.profit-a.profit;
-    if(sortV==='profit-asc')  return a.profit-b.profit;
+    if(sortV==='profit-desc') return b.lost-a.lost;
+    if(sortV==='profit-asc')  return a.lost-b.lost;
     if(sortV==='net-desc')    return b.net-a.net;
     if(sortV==='net-asc')     return a.net-b.net;
     if(sortV==='name-asc')    return a.name.localeCompare(b.name,'ko');
@@ -636,6 +670,7 @@ window.renderMgmt = function() {
   const ttCharge=members.reduce((s,m)=>s+m.charge,0);
   const ttExchange=members.reduce((s,m)=>s+m.exchange,0);
   const ttNet=members.reduce((s,m)=>s+m.net,0);
+  const ttRate = ttCharge > 0 ? Math.round((ttExchange/ttCharge)*100) : 0;
 
   document.getElementById('mgmt-sum-wrap').style.display='grid';
   document.getElementById('mgmt-toolbar').style.display='flex';
@@ -657,10 +692,16 @@ window.renderMgmt = function() {
   emptyEl.style.display='none';
 
   cardsEl.innerHTML=members.map(m=>{
-    const pc=m.profit>0?'pos':m.profit<0?'neg':'zero';
-    const nc=m.net>0?'pos':m.net<0?'neg':'zero';
-    const ps=m.profit>=0?'+':'-';
-    const ns=m.net>=0?'+':'-';
+    // 잃은금액은 항상 -로 표기 (손님 입장)
+    const lostSign = '-';
+    const lostAbs = Math.abs(m.lost);
+    const lostClass = m.lost > 0 ? 'neg' : m.lost < 0 ? 'pos' : 'zero';
+    const nc = m.net > 0 ? 'pos' : m.net < 0 ? 'neg' : 'zero';
+    const ns = m.net >= 0 ? '+' : '-';
+
+    // 환전율 색상: 높을수록 위험(빨강), 낮을수록 안전(초록)
+    const rateColor = m.rate >= 90 ? 'var(--minus)' : m.rate >= 70 ? 'var(--yellow)' : 'var(--plus)';
+
     return `<div class="mc">
       <div class="mc-head">
         <span class="mc-name">${esc(m.name)}</span>
@@ -670,18 +711,22 @@ window.renderMgmt = function() {
       <div class="mc-row"><span class="mc-lbl">💸 총 환전</span><span class="mc-val e">${fmt(m.exchange)}</span></div>
       <hr class="mc-divider">
       <div class="mc-row">
-        <span class="mc-lbl">📈 누적 손익</span>
-        <span class="mc-val ${pc}">${ps}${Math.abs(m.profit).toLocaleString('ko-KR')}원</span>
+        <span class="mc-lbl">📉 잃은금액</span>
+        <span class="mc-val ${lostClass}">${lostSign}${fmt(lostAbs)}</span>
       </div>
-      ${m.profit>0?`
+      <div class="mc-row">
+        <span class="mc-lbl">🎰 환전율</span>
+        <span class="mc-val" style="color:${rateColor};font-weight:700">${m.rate}%</span>
+      </div>
+      ${m.lost>0?`
       <div class="mc-row">
         <span class="mc-lbl"><span class="taxi-chip">🚕 차비 20%</span></span>
-        <span class="mc-val taxi">-${m.taxi.toLocaleString('ko-KR')}원</span>
+        <span class="mc-val taxi">-${fmt(m.taxi)}</span>
       </div>`:''}
       <hr class="mc-divider">
       <div class="mc-row">
         <span class="mc-lbl" style="font-size:13px;font-weight:600;color:var(--text-dim)">✨ 순수익</span>
-        <span class="net-val ${nc}">${ns}${Math.abs(m.net).toLocaleString('ko-KR')}원</span>
+        <span class="net-val ${nc}">${ns}${fmt(Math.abs(m.net))}</span>
       </div>
     </div>`;
   }).join('');
@@ -690,6 +735,56 @@ window.renderMgmt = function() {
 // 초기값
 document.getElementById('inp-date').value = todayStr();
 setShortcut('month');
+
+// ── 텔레그램 알림 ──
+const TG_TOKEN = '8988677994:AAHfbFReqwZ3izVEPSezCZFQkCa_HtLQTz8';
+const TG_CHAT  = '-5125655622';
+const sentAlerts = new Set(); // 중복 방지
+
+async function sendTelegram(msg) {
+  try {
+    await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: TG_CHAT, text: msg, parse_mode: 'HTML' })
+    });
+  } catch(e) { console.error('텔레그램 전송 실패', e); }
+}
+
+// 장부에 새 내역 추가될 때마다 체크
+function checkAlerts(allData) {
+  // 손님별 집계
+  const map = {};
+  allData.forEach(r => {
+    if (!map[r.name]) map[r.name] = { name: r.name, charge: 0, exchange: 0 };
+    if (r.type === 'charge')   map[r.name].charge   += r.amount;
+    else                       map[r.name].exchange += r.amount;
+  });
+
+  Object.values(map).forEach(m => {
+    const rate = m.charge > 0 ? Math.round((m.exchange / m.charge) * 100) : 0;
+    const chargeMan = m.charge / 10000;
+    const key = `${m.name}-${Math.floor(chargeMan)}-${rate}`;
+
+    // 조건: 충전 200만원 이상 + 환전율 50% 미만
+    if (chargeMan >= 200 && rate < 50 && !sentAlerts.has(key)) {
+      sentAlerts.add(key);
+      const lost = m.exchange - m.charge;
+      const lostFmt = (lost < 0 ? '-' : '') + Math.abs(lost / 10000) + '만원';
+      const msg =
+        `🚨 <b>환전율 경고</b>\n\n` +
+        `👤 손님: <b>${m.name}</b>\n` +
+        `💰 총 충전: ${chargeMan}만원\n` +
+        `💸 총 환전: ${m.exchange / 10000}만원\n` +
+        `📉 잃은금액: ${lostFmt}\n` +
+        `🎰 환전율: <b>${rate}%</b>\n\n` +
+        `⚠️ 충전 200만원 이상 + 환전율 50% 미만 손님입니다.`;
+      sendTelegram(msg);
+    }
+  });
+}
+
+// Firestore 실시간 구독 후 알림 체크 연동 완료
 
 </script>
 </body>

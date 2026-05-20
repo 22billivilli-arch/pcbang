@@ -453,8 +453,6 @@
   <div class="mgmt-toolbar" id="mgmt-toolbar" style="display:none">
     <input type="text" id="mgmt-search" placeholder="🔍  손님 이름 검색" oninput="renderMgmt()" list="customer-list">
     <select class="mgmt-sort-sel" id="mgmt-sort" onchange="renderMgmt()">
-      <option value="profit-desc">손익 높은순</option>
-      <option value="profit-asc">손익 낮은순</option>
       <option value="net-desc">순수익 높은순</option>
       <option value="net-asc">순수익 낮은순</option>
       <option value="name-asc">이름 가나다순</option>
@@ -677,7 +675,7 @@ window.renderMgmt = function() {
   const from   = document.getElementById('mgmt-from').value;
   const to     = document.getElementById('mgmt-to').value;
   const search = (document.getElementById('mgmt-search')?.value||'').trim().toLowerCase();
-  const sortV  = document.getElementById('mgmt-sort')?.value||'profit-desc';
+  const sortV  = document.getElementById('mgmt-sort')?.value||'net-desc';
   if(!from||!to){ showToast('❗ 기간을 설정해주세요.'); return; }
 
   const rows = data.filter(r=>r.date>=from && r.date<=to);
@@ -734,16 +732,8 @@ window.renderMgmt = function() {
   emptyEl.style.display='none';
 
   cardsEl.innerHTML=members.map(m=>{
-    // 잃은금액은 항상 -로 표기 (손님 입장)
-    const lostSign = '-';
-    const lostAbs = Math.abs(m.lost);
     const lostClass = m.lost > 0 ? 'neg' : m.lost < 0 ? 'pos' : 'zero';
-    const nc = m.net > 0 ? 'pos' : m.net < 0 ? 'neg' : 'zero';
-    const ns = m.net >= 0 ? '+' : '-';
-
-    // 환전율 색상: 높을수록 위험(빨강), 낮을수록 안전(초록)
     const rateColor = m.rate >= 90 ? 'var(--minus)' : m.rate >= 70 ? 'var(--yellow)' : 'var(--plus)';
-
     return `<div class="mc">
       <div class="mc-head">
         <span class="mc-name">${esc(m.name)}</span>
@@ -754,21 +744,11 @@ window.renderMgmt = function() {
       <hr class="mc-divider">
       <div class="mc-row">
         <span class="mc-lbl">📉 잃은금액</span>
-        <span class="mc-val ${lostClass}">${lostSign}${fmt(lostAbs)}</span>
+        <span class="mc-val ${lostClass}">-${fmt(Math.abs(m.lost))}</span>
       </div>
       <div class="mc-row">
         <span class="mc-lbl">🎰 환전율</span>
         <span class="mc-val" style="color:${rateColor};font-weight:700">${m.rate}%</span>
-      </div>
-      ${m.lost>0?`
-      <div class="mc-row">
-        <span class="mc-lbl"><span class="taxi-chip">🚕 차비 20%</span></span>
-        <span class="mc-val taxi">-${fmt(m.taxi)}</span>
-      </div>`:''}
-      <hr class="mc-divider">
-      <div class="mc-row">
-        <span class="mc-lbl" style="font-size:13px;font-weight:600;color:var(--text-dim)">✨ 순수익</span>
-        <span class="net-val ${nc}">${ns}${fmt(Math.abs(m.net))}</span>
       </div>
     </div>`;
   }).join('');
@@ -781,7 +761,8 @@ setShortcut('month');
 // ── 텔레그램 알림 ──
 const TG_TOKEN = '8988677994:AAHfbFReqwZ3izVEPSezCZFQkCa_HtLQTz8';
 const TG_CHAT  = '-5125655622';
-const sentAlerts = new Set(); // 중복 방지
+const sentAlerts = new Set();
+let tgOffset = 0;
 
 async function sendTelegram(msg) {
   try {
@@ -793,32 +774,75 @@ async function sendTelegram(msg) {
   } catch(e) { console.error('텔레그램 전송 실패', e); }
 }
 
-// 장부에 새 내역 추가될 때마다 체크
+// /지금 명령어 응답 - 전체 데이터 기준 조건 손님 리포트
+function buildNowReport() {
+  const map = {};
+  data.forEach(r => {
+    if (!map[r.name]) map[r.name] = { name: r.name, charge: 0, exchange: 0 };
+    if (r.type === 'charge') map[r.name].charge += r.amount;
+    else                     map[r.name].exchange += r.amount;
+  });
+
+  const targets = Object.values(map).filter(m => {
+    const chargeMan = m.charge / 10000;
+    const rate = m.charge > 0 ? Math.round((m.exchange / m.charge) * 100) : 0;
+    return chargeMan >= 200 && rate < 50;
+  });
+
+  if (targets.length === 0) {
+    return `✅ <b>조건 해당 손님 없음</b>\n\n충전 200만원 이상 + 환전율 50% 미만인 손님이 없습니다.`;
+  }
+
+  const lines = targets.map(m => {
+    const rate = m.charge > 0 ? Math.round((m.exchange / m.charge) * 100) : 0;
+    const lost = m.exchange - m.charge;
+    return `👤 <b>${m.name}</b>\n   💰 충전: ${fmt(m.charge)} | 💸 환전: ${fmt(m.exchange)}\n   📉 잃은금액: -${fmt(Math.abs(lost))} | 🎰 환전율: ${rate}%`;
+  }).join('\n\n');
+
+  return `📋 <b>현황 리포트</b> (충전 200만↑ + 환전율 50%↓)\n총 ${targets.length}명\n\n${lines}`;
+}
+
+// 텔레그램 명령어 polling (10초마다)
+async function pollTelegram() {
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?offset=${tgOffset}&timeout=5`);
+    const json = await res.json();
+    if (!json.ok) return;
+    for (const update of json.result) {
+      tgOffset = update.update_id + 1;
+      const text = update.message?.text?.trim();
+      if (text === '/지금') {
+        const report = buildNowReport();
+        await sendTelegram(report);
+      }
+    }
+  } catch(e) { /* 무시 */ }
+}
+setInterval(pollTelegram, 10000);
+pollTelegram(); // 즉시 1회 실행
+
+// 새 내역 추가 시 자동 알림 체크
 function checkAlerts(allData) {
-  // 손님별 집계
   const map = {};
   allData.forEach(r => {
     if (!map[r.name]) map[r.name] = { name: r.name, charge: 0, exchange: 0 };
-    if (r.type === 'charge')   map[r.name].charge   += r.amount;
-    else                       map[r.name].exchange += r.amount;
+    if (r.type === 'charge') map[r.name].charge   += r.amount;
+    else                     map[r.name].exchange += r.amount;
   });
 
   Object.values(map).forEach(m => {
     const rate = m.charge > 0 ? Math.round((m.exchange / m.charge) * 100) : 0;
     const chargeMan = m.charge / 10000;
     const key = `${m.name}-${Math.floor(chargeMan)}-${rate}`;
-
-    // 조건: 충전 200만원 이상 + 환전율 50% 미만
     if (chargeMan >= 200 && rate < 50 && !sentAlerts.has(key)) {
       sentAlerts.add(key);
       const lost = m.exchange - m.charge;
-      const lostFmt = (lost < 0 ? '-' : '') + Math.abs(lost / 10000) + '만원';
       const msg =
         `🚨 <b>환전율 경고</b>\n\n` +
         `👤 손님: <b>${m.name}</b>\n` +
-        `💰 총 충전: ${chargeMan}만원\n` +
-        `💸 총 환전: ${m.exchange / 10000}만원\n` +
-        `📉 잃은금액: ${lostFmt}\n` +
+        `💰 총 충전: ${fmt(m.charge)}\n` +
+        `💸 총 환전: ${fmt(m.exchange)}\n` +
+        `📉 잃은금액: -${fmt(Math.abs(lost))}\n` +
         `🎰 환전율: <b>${rate}%</b>\n\n` +
         `⚠️ 충전 200만원 이상 + 환전율 50% 미만 손님입니다.`;
       sendTelegram(msg);
